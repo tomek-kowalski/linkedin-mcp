@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { DEFAULT_SCOPES, PACKAGE_ROOT, readConfig, validateRedirectUri } from "../src/config.js";
 import { ConfigError } from "../src/errors.js";
@@ -45,6 +46,18 @@ test("the token file must be absolute and outside the repository", () => {
   assert.throws(() => readConfig(env({ LINKEDIN_TOKEN_FILE: resolve(PACKAGE_ROOT, "secrets", "token.json") })), /outside the linkedin-mcp repository/);
   const root = tempDir();
   assert.throws(() => readConfig(env({ LINKEDIN_TOKEN_FILE: join(root, "token.json") }), { packageRoot: root }), /outside/);
+});
+
+test("the token file may not be in any git repository (editorial, meta-mcp, …)", () => {
+  const repo = tempDir();
+  mkdirSync(join(repo, ".git"));
+  mkdirSync(join(repo, "private"));
+  assert.throws(() => readConfig(env({ LINKEDIN_TOKEN_FILE: join(repo, "private", "token.json") })), /not be inside a git repository/);
+});
+
+test("default scopes are what publishing needs; the admin scope is opt-in", () => {
+  assert.deepEqual([...DEFAULT_SCOPES], ["r_organization_social", "w_organization_social"]);
+  assert.ok(readConfig(env({ LINKEDIN_SCOPES: "r_organization_social w_organization_social rw_organization_admin" })).scopes.includes("rw_organization_admin"));
 });
 
 test("the redirect URI must be a loopback http URL with a port", () => {

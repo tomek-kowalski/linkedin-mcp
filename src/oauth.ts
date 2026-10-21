@@ -161,7 +161,7 @@ export class TokenManager implements TokenProvider {
     if (missing.length) {
       throw new AuthError(
         `The LinkedIn token lacks ${missing.join(", ")} (granted: ${tokens.scopes.join(", ") || "none"}). ` +
-          "The app needs that product approved; then run `npm run auth` again.",
+          "The app needs the product that grants it, the scope in LINKEDIN_SCOPES, then `npm run auth` again.",
         "not_sent",
       );
     }
@@ -169,11 +169,22 @@ export class TokenManager implements TokenProvider {
   }
 
   private refresh(tokens: StoredTokens): Promise<StoredTokens> {
-    // one refresh at a time: concurrent callers share it
+    // one refresh at a time: concurrent callers share it. Whatever happens to the refresh,
+    // no API request was made yet: the failure is "not_sent" for the caller's write.
     this.refreshing ??= refreshTokens(this.config, tokens, this.deps)
       .then((fresh) => {
         writeTokens(this.config.tokenFile, fresh);
         return fresh;
+      })
+      .catch((err: unknown) => {
+        if (err instanceof LinkedInError && err.outcome === "not_sent") throw err;
+        const refused = err instanceof AuthError;
+        throw new AuthError(
+          `Refreshing the LinkedIn token failed (${err instanceof Error ? err.message : String(err)}). Nothing was sent to LinkedIn.` +
+            (refused ? " Run `npm run auth` in linkedin-mcp." : " Try again later."),
+          "not_sent",
+          { status: err instanceof LinkedInError ? err.status : undefined, reauthorize: refused },
+        );
       })
       .finally(() => {
         this.refreshing = null;
@@ -182,15 +193,32 @@ export class TokenManager implements TokenProvider {
   }
 }
 
-/** What the redirect brought back. Pure: checks the path, the state and LinkedIn's error. */
-export function parseCallback(requestUrl: string, redirectUri: string, expectedState: string): { code: string } {
+/** Parses a request target on the redirect URI: origin-form only ("/path?query"), never "//host/…" or absolute. */
+function callbackUrl(requestUrl: string, redirectUri: string): URL {
   const expected = new URL(redirectUri);
+  if (!requestUrl.startsWith("/") || requestUrl.startsWith("//")) throw new AuthError("Unexpected request target on the redirect URI.", "not_sent");
   const got = new URL(requestUrl, `${expected.protocol}//${expected.host}`);
-  if (got.pathname !== expected.pathname) throw new AuthError("Unexpected path on the redirect URI.", "not_sent", { reauthorize: true });
-  const state = got.searchParams.get("state") ?? "";
-  const a = Buffer.from(state);
+  if (got.host !== expected.host || got.pathname !== expected.pathname) throw new AuthError("Unexpected path on the redirect URI.", "not_sent");
+  return got;
+}
+
+/** Constant-time comparison of the returned state with the one this flow generated. */
+export function stateMatches(requestUrl: string, redirectUri: string, expectedState: string): boolean {
+  let got: URL;
+  try {
+    got = callbackUrl(requestUrl, redirectUri);
+  } catch {
+    return false;
+  }
+  const a = Buffer.from(got.searchParams.get("state") ?? "");
   const b = Buffer.from(expectedState);
-  if (a.length !== b.length || !timingSafeEqual(a, b)) {
+  return expectedState.length > 0 && a.length === b.length && timingSafeEqual(a, b);
+}
+
+/** What the redirect brought back. Pure: checks the target, the state and LinkedIn's error. */
+export function parseCallback(requestUrl: string, redirectUri: string, expectedState: string): { code: string } {
+  const got = callbackUrl(requestUrl, redirectUri);
+  if (!stateMatches(requestUrl, redirectUri, expectedState)) {
     throw new AuthError("The state returned by LinkedIn doesn't match (possible CSRF): nothing was exchanged. Run `npm run auth` again.", "not_sent");
   }
   const error = got.searchParams.get("error");
@@ -211,15 +239,28 @@ export interface AuthorizeOptions extends OAuthDeps {
   waitMs?: number;
   /** For tests: a fixed state */
   state?: string;
+  /** Told about requests that were ignored (wrong state, host or target) */
+  onIgnored?: (reason: string) => void;
 }
 
 const page = (title: string, text: string) =>
   `<!doctype html><meta charset="utf-8"><title>${title}</title><body style="font-family:system-ui;margin:3rem"><h1>${title}</h1><p>${text}</p></body>`;
 
+const PAGE_HEADERS = {
+  "Content-Type": "text/html; charset=utf-8",
+  "Cache-Control": "no-store",
+  "Referrer-Policy": "no-referrer",
+  "X-Content-Type-Options": "nosniff",
+} as const;
+
 /**
  * Runs the local authorization: listens on the redirect URI (loopback only), waits for
  * LinkedIn's redirect, validates it, exchanges the code and stores the tokens.
- * Only the first matching redirect is used; the listener closes afterwards.
+ *
+ * - A request with the wrong state, Host or target is answered 400 and ignored: it can't
+ *   inject a code (CSRF) nor end the flow; the genuine redirect still works.
+ * - A redirect with the right state settles the flow: its code is exchanged, or its
+ *   `error` (e.g. the owner cancelled) is reported. The listener closes afterwards.
  */
 export async function authorize(config: OAuthConfig, options: AuthorizeOptions): Promise<TokenStatus> {
   const redirect = new URL(config.redirectUri);
@@ -229,16 +270,24 @@ export async function authorize(config: OAuthConfig, options: AuthorizeOptions):
   try {
     const code = await new Promise<string>((resolveCode, reject) => {
       server = createServer((req, res) => {
-        if (req.method !== "GET" || !req.url || new URL(req.url, redirect).pathname !== redirect.pathname) {
-          res.writeHead(404).end();
+        const target = req.url ?? "";
+        if (req.method !== "GET" || req.headers.host !== redirect.host) {
+          res.writeHead(400, PAGE_HEADERS).end(page("Bad request", ""));
+          options.onIgnored?.("a request with an unexpected method or Host header");
+          return;
+        }
+        if (!stateMatches(target, config.redirectUri, state)) {
+          const onPath = target.startsWith("/") && !target.startsWith("//") && new URL(target, redirect).pathname === redirect.pathname;
+          res.writeHead(onPath ? 400 : 404, PAGE_HEADERS).end(page(onPath ? "Authorization failed" : "Not found", ""));
+          if (onPath) options.onIgnored?.("a redirect whose state doesn't match (possible CSRF)");
           return;
         }
         try {
-          const { code } = parseCallback(req.url, config.redirectUri, state);
-          res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" }).end(page("Signed in", "LinkedIn authorization received. You can close this tab."));
+          const { code } = parseCallback(target, config.redirectUri, state);
+          res.writeHead(200, PAGE_HEADERS).end(page("Signed in", "LinkedIn authorization received. You can close this tab."));
           resolveCode(code);
         } catch (err) {
-          res.writeHead(400, { "Content-Type": "text/html; charset=utf-8" }).end(page("Authorization failed", "Return to the terminal for details."));
+          res.writeHead(400, PAGE_HEADERS).end(page("Authorization failed", "Return to the terminal for details."));
           reject(err);
         }
       });
@@ -256,8 +305,12 @@ export async function authorize(config: OAuthConfig, options: AuthorizeOptions):
     if (timer) clearTimeout(timer);
     const s = server as Server | undefined;
     if (s) {
-      s.closeAllConnections();
-      await new Promise<void>((done) => s.close(() => done()));
+      // let the answer to the browser finish; drop idle keep-alive connections, then any left after 2 s
+      const closed = new Promise<void>((done) => s.close(() => done()));
+      s.closeIdleConnections();
+      const force = setTimeout(() => s.closeAllConnections(), 2_000);
+      await closed;
+      clearTimeout(force);
     }
   }
 }

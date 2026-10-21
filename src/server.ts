@@ -85,7 +85,7 @@ export function createServer(ctx: ToolContext): McpServer {
       title: "Get LinkedIn Company Page",
       description:
         "Read the configured LinkedIn organization (LINKEDIN_ORGANIZATION_ID): id, URN, name, vanity name, website. " +
-        "Needs rw_organization_admin and a page administrator. Read-only.",
+        "Needs the rw_organization_admin scope (add it to LINKEDIN_SCOPES) and a page administrator; not needed for publishing. Read-only.",
       annotations: READ_ONLY,
     },
     () => run(() => handlers.linkedin_get_organization(ctx)),

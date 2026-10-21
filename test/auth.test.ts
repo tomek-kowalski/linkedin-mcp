@@ -4,7 +4,7 @@ import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "
 import { createServer } from "node:net";
 import { dirname, join } from "node:path";
 import { AuthError, NetworkError } from "../src/errors.js";
-import { authorize, authorizationUrl, exchangeCode, parseCallback, TOKEN_URL, TokenManager } from "../src/oauth.js";
+import { authorize, authorizationUrl, exchangeCode, parseCallback, stateMatches, TOKEN_URL, TokenManager } from "../src/oauth.js";
 import { clearSecrets, redactString } from "../src/sanitize.js";
 import { readTokens, writeTokens } from "../src/token-store.js";
 import { FAKE_ACCESS, FAKE_REFRESH, FAKE_SECRET, mockFetch, NOW, signedIn, tempDir, testConfig, tokens } from "./helpers.js";
@@ -152,7 +152,10 @@ test("refresh refused or refresh token expired: reauthorize", async () => {
   const config = testConfig();
   signedIn(config, { expires_at: "2026-10-21T11:00:00.000Z", refresh_token: FAKE_REFRESH, refresh_token_expires_at: "2027-10-21T12:00:00.000Z" });
   const { impl } = mockFetch(() => ({ status: 400, body: { error: "invalid_request", error_description: "The provided authorization grant or refresh token is invalid, expired or revoked" } }));
-  await assert.rejects(new TokenManager(config, { fetchImpl: impl, now }).getAccessToken(), (err: unknown) => err instanceof AuthError && err.reauthorize && !err.message.includes(FAKE_REFRESH));
+  await assert.rejects(
+    new TokenManager(config, { fetchImpl: impl, now }).getAccessToken(),
+    (err: unknown) => err instanceof AuthError && err.reauthorize && err.outcome === "not_sent" && !err.message.includes(FAKE_REFRESH),
+  );
 
   signedIn(config, { expires_at: "2026-10-21T11:00:00.000Z", refresh_token: FAKE_REFRESH, refresh_token_expires_at: "2026-10-01T00:00:00.000Z" });
   await assert.rejects(new TokenManager(config, { fetchImpl: impl, now }).getAccessToken(), /expired/);
@@ -197,16 +200,112 @@ test("local flow end to end: redirect with the right state is exchanged and stor
   assert.ok(!readFileSync(config.tokenFile, "utf8").includes("AUTHCODE"));
 });
 
-test("local flow: a forged state is rejected and nothing is stored", async () => {
+/** A raw HTTP/1.1 GET, so the request target and Host header are exactly what a test sends. */
+async function rawGet(port: number, target: string, host = `127.0.0.1:${port}`): Promise<number> {
+  const { connect } = await import("node:net");
+  return new Promise((resolveStatus, reject) => {
+    const socket = connect(port, "127.0.0.1", () => socket.write(`GET ${target} HTTP/1.1\r\nHost: ${host}\r\nConnection: close\r\n\r\n`));
+    let data = "";
+    socket.on("data", (d) => (data += d));
+    socket.on("end", () => resolveStatus(Number(data.split(" ")[1])));
+    socket.on("error", reject);
+  });
+}
+
+test("local flow: forged state, wrong Host and odd targets are ignored; the genuine redirect still signs in", async () => {
+  const port = await freePort();
+  const config = { ...testConfig(), redirectUri: `http://127.0.0.1:${port}/callback` };
+  const tokenFetch = mockFetch(() => ({ body: { access_token: FAKE_ACCESS, expires_in: 5184000 } }));
+  const ignored: string[] = [];
+  const statuses: number[] = [];
+  let requests: Promise<void> = Promise.resolve();
+  const done = authorize(config, {
+    fetchImpl: tokenFetch.impl,
+    now,
+    state: "FIXEDSTATE0123456789",
+    onIgnored: (reason) => ignored.push(reason),
+    onAuthorizationUrl: () =>
+      void (requests = (async () => {
+        statuses.push(await rawGet(port, "/callback?code=ATTACKERCODE-0123456789&state=FORGED"));
+        statuses.push(await rawGet(port, "/callback?code=ATTACKERCODE-0123456789"));
+        statuses.push(await rawGet(port, "/callback?code=ATTACKERCODE-0123456789&state=FIXEDSTATE0123456789", "evil.example"));
+        statuses.push(await rawGet(port, "//evil.example/callback?code=ATTACKERCODE-0123456789&state=FIXEDSTATE0123456789"));
+        statuses.push(await rawGet(port, "/callback?code=AUTHCODE-0123456789&state=FIXEDSTATE0123456789"));
+      })()),
+  });
+  const status = await done;
+  await requests;
+  assert.equal(status.state, "valid");
+  assert.deepEqual(statuses, [400, 400, 400, 404, 200]);
+  assert.equal(ignored.length, 3);
+  // only the genuine code was exchanged
+  assert.equal(tokenFetch.calls.length, 1);
+  assert.equal(new URLSearchParams(String(tokenFetch.calls[0].init.body)).get("code"), "AUTHCODE-0123456789");
+});
+
+test("local flow: only forged redirects → times out, nothing exchanged or stored", async () => {
   const port = await freePort();
   const config = { ...testConfig(), redirectUri: `http://127.0.0.1:${port}/callback` };
   const tokenFetch = mockFetch(() => ({ body: {} }));
   const done = authorize(config, {
     fetchImpl: tokenFetch.impl,
     state: "FIXEDSTATE0123456789",
-    onAuthorizationUrl: () => void fetch(`http://127.0.0.1:${port}/callback?code=AUTHCODE-0123456789&state=FORGED`).then((r) => r.text()),
+    waitMs: 300,
+    onAuthorizationUrl: () => void rawGet(port, "/callback?code=AUTHCODE-0123456789&state=FORGED"),
   });
-  await assert.rejects(done, /doesn't match/);
+  await assert.rejects(done, (e: unknown) => e instanceof AuthError && /in time/.test((e as Error).message));
   assert.equal(tokenFetch.calls.length, 0);
   assert.equal(existsSync(join(dirname(config.tokenFile), "linkedin-token.json")), false);
+});
+
+test("local flow: the owner cancelling (right state, error) ends the flow with the reason", async () => {
+  const port = await freePort();
+  const config = { ...testConfig(), redirectUri: `http://127.0.0.1:${port}/callback` };
+  const done = authorize(config, {
+    state: "FIXEDSTATE0123456789",
+    onAuthorizationUrl: () => void rawGet(port, "/callback?error=user_cancelled_authorize&error_description=cancelled&state=FIXEDSTATE0123456789"),
+  });
+  await assert.rejects(done, (e: unknown) => e instanceof AuthError && e.code === "user_cancelled_authorize");
+});
+
+test("callback parsing: absolute and protocol-relative targets are refused", () => {
+  const redirect = "http://localhost:8765/callback";
+  assert.throws(() => parseCallback("//evil.example/callback?code=abc&state=S1", redirect, "S1"), /Unexpected/);
+  assert.throws(() => parseCallback("http://evil.example/callback?code=abc&state=S1", redirect, "S1"), /Unexpected/);
+  assert.equal(stateMatches("/callback?state=S1", redirect, ""), false);
+});
+
+test("token store: concurrent writers in other threads never leave a partial file for readers", async () => {
+  const config = testConfig();
+  writeTokens(config.tokenFile, tokens());
+  const { Worker } = await import("node:worker_threads");
+  const storeUrl = new URL("../src/token-store.js", import.meta.url).href;
+  const code = `
+    const { workerData } = require("node:worker_threads");
+    import(workerData.storeUrl).then(({ writeTokens }) => {
+      for (let i = 0; i < 40; i++) writeTokens(workerData.file, { ...workerData.tokens, access_token: "AQVworker" + workerData.n + "-" + i + "-0123456789abcdef" });
+    });`;
+  const workers = [1, 2, 3].map((n) => new Worker(code, { eval: true, workerData: { storeUrl, file: config.tokenFile, tokens: tokens(), n } }));
+  const finished = Promise.all(workers.map((w) => new Promise((done, fail) => (w.on("exit", done), w.on("error", fail)))));
+  let reads = 0;
+  let running = true;
+  void finished.then(() => (running = false));
+  while (running) {
+    const t = readTokens(config.tokenFile); // throws on a partial or invalid file
+    assert.ok(t && t.access_token.startsWith("AQV"));
+    reads += 1;
+    await new Promise((r) => setImmediate(r));
+  }
+  await finished;
+  assert.ok(reads > 0);
+  assert.match(readTokens(config.tokenFile)!.access_token, /^AQVworker\d-39-/);
+  assert.deepEqual(readdirSync(dirname(config.tokenFile)), ["linkedin-token.json"]);
+});
+
+test("token store: a token file readable by others is refused (POSIX)", { skip: process.platform === "win32" }, async () => {
+  const { chmodSync } = await import("node:fs");
+  const config = testConfig();
+  writeTokens(config.tokenFile, tokens());
+  chmodSync(config.tokenFile, 0o644);
+  assert.throws(() => readTokens(config.tokenFile), /readable by other users/);
 });

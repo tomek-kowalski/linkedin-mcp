@@ -1,6 +1,6 @@
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { escapeLittleText, formatCommentary, MAX_COMMENTARY, plainText, RESERVED } from "../src/format.js";
+import { escapeLittleText, formatCommentary, MAX_COMMENTARY, normalizeText, plainText, RESERVED, textLength } from "../src/format.js";
 import { clearSecrets, REDACTED, redactString, registerSecret, sanitize } from "../src/sanitize.js";
 
 beforeEach(() => clearSecrets());
@@ -11,24 +11,38 @@ test("every reserved character is backslash-escaped", () => {
   assert.equal(escapeLittleText("Zażółć gęślą jaźń. Straße!"), "Zażółć gęślą jaźń. Straße!");
 });
 
-test("formatCommentary: hashtags kept, other # escaped, newlines kept, trimmed", () => {
-  assert.equal(formatCommentary("  Line 1\r\nLine 2 #WooCommerce, #Wydajność.\nC# and issue #12 x#y  "),
-    "Line 1\nLine 2 {hashtag|\\#|WooCommerce}, {hashtag|\\#|Wydajność}.\nC\\# and issue {hashtag|\\#|12} x\\#y");
+test("formatCommentary: #word hashtags sent plain (as in the Posts API examples), other # escaped", () => {
+  assert.equal(formatCommentary("  Line 1\r\nLine 2 #WooCommerce, #Wydajność.\nC# and issue #12 x#y #3D  "),
+    "Line 1\nLine 2 #WooCommerce, #Wydajność.\nC\\# and issue \\#12 x\\#y #3D");
   assert.equal(formatCommentary("#tag_with_underscore"), "\\#tag\\_with\\_underscore");
   assert.equal(formatCommentary("#a", { hashtags: false }), "\\#a");
   assert.equal(formatCommentary("Bullets:\n* one\n* two"), "Bullets:\n\\* one\n\\* two");
 });
 
-test("formatCommentary: empty and too long are refused", () => {
+test("German and Polish text: umlauts, ß, NFD input composed, emoji counted once", () => {
+  const de = "Größere Datenbanken: weniger Abfragen (–40 %) #Datenbankoptimierung #Größe";
+  assert.equal(formatCommentary(de), "Größere Datenbanken: weniger Abfragen \\(–40 %\\) #Datenbankoptimierung #Größe");
+  assert.equal(formatCommentary(de.normalize("NFD")), formatCommentary(de));
+  assert.equal(formatCommentary("Zażółć gęślą jaźń #Wydajność"), "Zażółć gęślą jaźń #Wydajność");
+  assert.equal(formatCommentary("Straße"), "Straße"); // ß is not folded to ss
+  assert.equal(textLength("👍👍"), 2);
+  assert.equal(normalizeText("a\r\nb\rc "), "a\nb\nc");
+  // 3000 emoji are 6000 UTF-16 units but 3000 characters
+  assert.doesNotThrow(() => formatCommentary("👍".repeat(MAX_COMMENTARY)));
+});
+
+test("formatCommentary: empty and too long are refused (an internal limit)", () => {
   assert.throws(() => formatCommentary("   "), RangeError);
   assert.equal(formatCommentary("x".repeat(MAX_COMMENTARY)).length, MAX_COMMENTARY);
   assert.throws(() => formatCommentary("x".repeat(MAX_COMMENTARY + 1)), /3000/);
 });
 
-test("plainText undoes the formatting (for matching a posted text)", () => {
-  const text = "Kod (PHP) w 3 krokach_ok? #WooCommerce\nhttps://foreachurl.app/en/news/a_b";
-  assert.equal(plainText(formatCommentary(text)), text);
-  assert.equal(plainText("Hi @[ForeachURL](urn:li:organization:123) {hashtag|＃|Tag}"), "Hi ForeachURL #Tag");
+test("plainText undoes the formatting and LinkedIn's returned templates (for matching a posted text)", () => {
+  for (const text of ["Kod (PHP) w 3 krokach_ok? #WooCommerce\nhttps://foreachurl.app/en/news/a_b", "Größe {x} [y] <z> @me ~ * | \\ #12 #Lösung"]) {
+    assert.equal(plainText(formatCommentary(text)), text);
+  }
+  assert.equal(plainText("Hi @[ForeachURL](urn:li:organization:123) {hashtag|＃|Tag} {hashtag|\\#|Größe}"), "Hi ForeachURL #Tag #Größe");
+  assert.equal(plainText("Größe"), "Größe");
 });
 
 test("redaction: registered secrets, query and form parameters, JSON fields, bearer headers, secret keys", () => {

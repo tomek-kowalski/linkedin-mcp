@@ -1,4 +1,5 @@
-import { dirname, isAbsolute, relative, resolve } from "node:path";
+import { existsSync } from "node:fs";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import { ConfigError } from "./errors.js";
@@ -8,10 +9,13 @@ import { registerSecret } from "./sanitize.js";
 export const PACKAGE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
 /**
- * Organization posting (w_organization_social), reading its posts (r_organization_social)
- * and the organization lookup (rw_organization_admin). All need the Community Management API.
+ * What publishing needs: posting and uploading images as the organization (w_organization_social)
+ * and reading its posts, for duplicate recovery (r_organization_social). The organization lookup
+ * also needs rw_organization_admin; it's not requested by default because LinkedIn rejects the
+ * whole authorization ("Invalid scope") when a requested scope isn't assigned to the app.
+ * Add it with LINKEDIN_SCOPES once the app has it.
  */
-export const DEFAULT_SCOPES = ["r_organization_social", "w_organization_social", "rw_organization_admin"] as const;
+export const DEFAULT_SCOPES = ["r_organization_social", "w_organization_social"] as const;
 
 export interface LinkedInConfig {
   clientId: string;
@@ -63,6 +67,9 @@ export function readConfig(env: Record<string, string | undefined>, options: { p
   if (rel === "" || (!rel.startsWith("..") && !isAbsolute(rel))) {
     throw new ConfigError("LINKEDIN_TOKEN_FILE must be outside the linkedin-mcp repository (it is public).");
   }
+  if (insideGitWorkTree(dirname(tokenFile))) {
+    throw new ConfigError("LINKEDIN_TOKEN_FILE must not be inside a git repository: tokens never belong in one.");
+  }
 
   const scopes = e.LINKEDIN_SCOPES ? e.LINKEDIN_SCOPES.split(/[\s,]+/).filter(Boolean) : [...DEFAULT_SCOPES];
   if (!scopes.every((s) => /^[a-z_]{3,64}$/.test(s))) throw new ConfigError("LINKEDIN_SCOPES must be space-separated scope names.");
@@ -95,4 +102,12 @@ export function validateRedirectUri(value: string): string {
   return url.toString();
 }
 
-export const organizationUrn = (organizationId: string) => `urn:li:organization:${organizationId}`;
+/** Is `dir` (or one of its parents) a git working tree? */
+function insideGitWorkTree(dir: string): boolean {
+  for (let d = resolve(dir); ; d = dirname(d)) {
+    if (existsSync(join(d, ".git"))) return true;
+    if (dirname(d) === d) return false;
+  }
+}
+
+export const organizationUrn =(organizationId: string) => `urn:li:organization:${organizationId}`;
