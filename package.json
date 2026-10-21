@@ -1,0 +1,35 @@
+{
+  "name": "linkedin-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "LinkedIn REST API client and read-only local MCP server for the ForeachURL Company Page",
+  "type": "module",
+  "main": "dist/src/lib.js",
+  "types": "dist/src/lib.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/src/lib.d.ts",
+      "default": "./dist/src/lib.js"
+    }
+  },
+  "bin": {
+    "linkedin-mcp": "dist/src/index.js"
+  },
+  "engines": {
+    "node": ">=20.12"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/src/index.js",
+    "test": "npm run build && node --test \"dist/test/**/*.test.js\"",
+    "auth": "npm run build --silent && node dist/src/auth-bin.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.1",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "typescript": "^7.0.2"
+  }
+}
