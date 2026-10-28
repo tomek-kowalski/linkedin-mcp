@@ -56,7 +56,7 @@ export function readConfig(env: Record<string, string | undefined>, options: { p
   const parsed = envSchema.safeParse(env);
   if (!parsed.success) {
     const issues = parsed.error.issues.map((i) => i.message);
-    throw new ConfigError(`LinkedIn configuration is invalid: ${[...new Set(issues)].join("; ")}. See .env.example.`);
+    throw new ConfigError(`LinkedIn configuration is invalid: ${[...new Set(issues)].join("; ")}. Set them in .env (see Configuration in the README).`);
   }
   const e = parsed.data;
   registerSecret(e.LINKEDIN_CLIENT_SECRET);

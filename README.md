@@ -18,16 +18,16 @@ This repository is public. Content, client data, tokens and private paths never 
 ```sh
 cd E:\react\campaign\linkedin-mcp
 npm install
-cp .env.example .env     # fill in locally; never commit .env
 npm run build            # outputs dist/
 npm test                 # build + unit tests (mocked HTTP, no LinkedIn calls)
 ```
 
 ## Configuration
 
-The bin scripts (`npm run auth`, `npm start`) read `<package>/.env`. Variables already set in the environment take
-precedence. **Importing the library reads neither `.env` nor `process.env`:** the host passes its configuration
-explicitly (see [Integration contract](#integration-contract-for-meta-mcp)).
+The configuration lives only in `<package>/.env`, which holds the real credentials and is gitignored: never commit it.
+There is no example file; create `.env` locally with the variables below. The bin scripts (`npm run auth`,
+`npm run publish`, `npm start`) read it. Variables already set in the environment take precedence.
+**Importing the library reads neither `.env` nor `process.env`:** the host passes its configuration explicitly (see [Integration contract](#integration-contract-for-meta-mcp)).
 
 | Variable                   | Required | Description |
 | -------------------------- | -------- | ----------- |
