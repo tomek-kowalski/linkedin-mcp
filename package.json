@@ -22,7 +22,8 @@
     "build": "tsc -p tsconfig.json",
     "start": "node dist/src/index.js",
     "test": "npm run build && node --test \"dist/test/**/*.test.js\"",
-    "auth": "npm run build --silent && node dist/src/auth-bin.js"
+    "auth": "npm run build --silent && node dist/src/auth-bin.js",
+    "publish": "npm run build --silent && node dist/src/publish-bin.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.1",

@@ -304,6 +304,11 @@ export class LinkedInClient {
     return this.createPost({ ...defaults(), author: input.author, commentary: commentary(input.text), content: { article: input.article } });
   }
 
+  /** A text-only post. URLs in the text are posted as written; LinkedIn doesn't add a preview card. */
+  async createTextPost(input: { author: string; text: string }): Promise<{ id: string; requestId: string | null }> {
+    return this.createPost({ ...defaults(), author: input.author, commentary: commentary(input.text) });
+  }
+
   /** A single-image post; `image` is the URN from initializeImageUpload, after uploadImage. */
   async createImagePost(input: ImagePostInput): Promise<{ id: string; requestId: string | null }> {
     const media = input.altText ? { id: input.image, altText: input.altText } : { id: input.image };

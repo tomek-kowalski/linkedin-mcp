@@ -5,9 +5,8 @@ server with **read-only** tools.
 
 - **Library:** the OAuth sign-in, the token store and `LinkedInClient` (organization, posts, image upload, post creation).
   `meta-mcp` uses it as a local dependency to publish approved posts.
-- **MCP server:** `linkedin_get_organization` and `linkedin_list_posts`. There is no publishing tool. Posting goes only
-  through the approval-gated workflow in `meta-mcp`, which owns approval, `state.json`, the publication log and
-  duplicate recovery.
+- **MCP server:** `linkedin_get_organization` and `linkedin_list_posts`. There is no publishing tool.
+- **Publishing:** `npm run publish`, run by the owner in their own terminal (see [Publishing](#publishing-npm-run-publish)).
 
 Runtime: Node.js ≥ 20.12, TypeScript, Zod, `@modelcontextprotocol/sdk` (stdio). API: `https://api.linkedin.com/rest`,
 versioned (`LinkedIn-Version: YYYYMM`, `X-Restli-Protocol-Version: 2.0.0`).
@@ -78,6 +77,23 @@ npm run auth -- --status   # token state, expiry, scopes, refresh token yes/no (
   needed it. `reauthorize` is `false` when only trying later is needed.
 - Concurrent callers in one process share a single refresh. Two processes may each refresh; LinkedIn keeps the
   refresh token, so both results are valid and the last write wins.
+
+## Publishing (`npm run publish`)
+
+```sh
+npm run publish -- content/<post>.txt [--image <png|jpg>] [--alt "…"] [--dry-run]
+```
+
+- The text file is exactly the post's text (UTF-8). Keep post texts in `content/`, which is gitignored: content never
+  goes in this repository.
+- The token is checked first (`w_organization_social`, `r_organization_social`); without it nothing is sent.
+- The page's 25 most recent posts are searched for the same text. If it's there (for example after an answer was
+  lost), nothing is posted again.
+- The exact text, image and page are shown, and the owner types a code derived from them. Without the code, without
+  an interactive terminal, or with `--dry-run`, nothing is posted.
+- With `--image`: upload, then a single-image post. Without it: a text-only post (URLs aren't turned into a preview card).
+- Writes are never retried. Every outcome is appended to `content/publications.jsonl`. On an `unknown` outcome, run
+  the same command again: it looks for the post before posting.
 
 ## MCP server
 
